@@ -60,11 +60,6 @@ class SilvercrestBPBluetoothDeviceData(BluetoothData):
         """
         return not last_poll or last_poll > UPDATE_INTERVAL
 
-import logging
-from datetime import datetime, timezone
-
-_LOGGER = logging.getLogger(__name__)
-
     @retry_bluetooth_connection_error()
     def notification_handler(self, _, data) -> None:
         """Helper for command events, parsing and updating sensor data."""
