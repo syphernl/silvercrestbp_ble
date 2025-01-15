@@ -60,58 +60,71 @@ class SilvercrestBPBluetoothDeviceData(BluetoothData):
         """
         return not last_poll or last_poll > UPDATE_INTERVAL
 
+import logging
+from datetime import datetime, timezone
+
+_LOGGER = logging.getLogger(__name__)
+
     @retry_bluetooth_connection_error()
     def notification_handler(self, _, data) -> None:
-        """Helper for command events"""
-        syst = data[2] * 256 + data[1]
-        diast = data[4] * 256 + data[3]
-        arter = data[6] * 256 + data[5]
-        dyear = data[8] * 256 + data[7]
-        dmonth = data[9]
-        dday = data[10]
-        dhour = data[11]
-        dminu = data[12]
-        puls = data[15] * 256 + data[14]
-        user = data[16]
+        """Helper for command events, parsing and updating sensor data."""
         try:
-            datetime_str = f"{dyear}/{dmonth}/{dday} {dhour}:{dminu:0>2}"
-            date = datetime.strptime(datetime_str, '%Y/%m/%d %H:%M')
-            local_timezone = datetime.now(timezone.utc).astimezone().tzinfo
-            self.update_sensor(
-                key=str(SilvercrestBPSensor.TIMESTAMP),
-                native_unit_of_measurement=None,
-                native_value=date.replace(tzinfo=local_timezone),
-                name="Measured Date",
+            # Debug log for raw data received
+            _LOGGER.debug("Raw data received from BLE device: %s", data)
+
+            syst = data[2] * 256 + data[1]
+            diast = data[4] * 256 + data[3]
+            arter = data[6] * 256 + data[5]  # This variable is parsed but not used
+            dyear = data[8] * 256 + data[7]
+            dmonth = data[9]
+            dday = data[10]
+            dhour = data[11]
+            dminu = data[12]
+            puls = data[15] * 256 + data[14]
+            user = data[16]  # This variable is parsed but not used
+
+            try:
+                datetime_str = f"{dyear}/{dmonth}/{dday} {dhour}:{dminu:0>2}"
+                date = datetime.strptime(datetime_str, '%Y/%m/%d %H:%M')
+                local_timezone = datetime.now(timezone.utc).astimezone().tzinfo
+                self.update_sensor(
+                    key=str(SilvercrestBPSensor.TIMESTAMP),
+                    native_unit_of_measurement=None,
+                    native_value=date.replace(tzinfo=local_timezone),
+                    name="Measured Date",
+                )
+            except Exception as e:
+                _LOGGER.error("Failed to parse and update Measured Date: %s", str(e))
+
+            _LOGGER.info(
+                "Parsed data from BPM device (systolic: %s, diastolic: %s, pulse: %s)",
+                syst, diast, puls
             )
-        except:
-            _LOGGER.error("Can't add Measured Date")
 
-        _LOGGER.info(
-            "Got data from BPM device (syst: %s, diast: %s, puls: %s)",
-            syst, diast, puls)
-
-        self.update_sensor(
-            key=str(SilvercrestBPSensor.SYSTOLIC),
-            native_unit_of_measurement=Units.PRESSURE_MMHG,
-            native_value=syst,
-            device_class=SensorDeviceClass.PRESSURE,
-            name="Systolic",
-        )
-        self.update_sensor(
-            key=str(SilvercrestBPSensor.DIASTOLIC),
-            native_unit_of_measurement=Units.PRESSURE_MMHG,
-            native_value=diast,
-            device_class=SensorDeviceClass.PRESSURE,
-            name="Diastolic",
-        )
-        self.update_sensor(
-            key=str(SilvercrestBPSensor.PULSE),
-            native_unit_of_measurement="bpm",
-            native_value=puls,
-            name="Pulse",
-        )
-        self._event.set()
-        return
+            self.update_sensor(
+                key=str(SilvercrestBPSensor.SYSTOLIC),
+                native_unit_of_measurement=Units.PRESSURE_MMHG,
+                native_value=syst,
+                device_class=SensorDeviceClass.PRESSURE,
+                name="Systolic",
+            )
+            self.update_sensor(
+                key=str(SilvercrestBPSensor.DIASTOLIC),
+                native_unit_of_measurement=Units.PRESSURE_MMHG,
+                native_value=diast,
+                device_class=SensorDeviceClass.PRESSURE,
+                name="Diastolic",
+            )
+            self.update_sensor(
+                key=str(SilvercrestBPSensor.PULSE),
+                native_unit_of_measurement="bpm",
+                native_value=puls,
+                name="Pulse",
+            )
+        except Exception as e:
+            _LOGGER.error("Unexpected error while handling BLE notification: %s", str(e))
+        finally:
+            self._event.set()
 
     async def async_poll(self, ble_device: BLEDevice) -> SensorUpdate:
         """
@@ -125,8 +138,8 @@ class SilvercrestBPBluetoothDeviceData(BluetoothData):
             await client.start_notify(
                 CHARACTERISTIC_BLOOD_PRESSURE, self.notification_handler
             )
-        except:
-            _LOGGER.warn("Notify Bleak error")
+        except Exception as e:
+            _LOGGER.error("Failed to start notify on BLE device %s: %s", ble_device.address, str(e))
 
         # battery_char = client.services.get_characteristic(CHARACTERISTIC_BATTERY)
         # battery_payload = await client.read_gatt_char(battery_char)
@@ -140,13 +153,20 @@ class SilvercrestBPBluetoothDeviceData(BluetoothData):
 
         # Wait to see if a callback comes in.
         try:
-            await asyncio.wait_for(self._event.wait(), 15)
+            # Wait to see if a callback comes in within 15 seconds.
+            await asyncio.wait_for(self._event.wait(), timeout=15)
         except asyncio.TimeoutError:
-            _LOGGER.warn("Timeout getting command data.")
-        except:
-            _LOGGER.warn("Wait For Bleak error")
+            _LOGGER.warning("Timeout while waiting for command data from BLE device.")
+        except Exception as e:
+            _LOGGER.error("Unexpected error while waiting for BLE response: %s", str(e))
         finally:
-            await client.stop_notify(CHARACTERISTIC_BLOOD_PRESSURE)
-            await client.disconnect()
-            _LOGGER.debug("Disconnected from active bluetooth client")
+            try:
+                await client.stop_notify(CHARACTERISTIC_BLOOD_PRESSURE)
+            except Exception as e:
+                _LOGGER.error("Failed to stop notification on BLE device: %s", str(e))
+            try:
+                await client.disconnect()
+            except Exception as e:
+                _LOGGER.error("Failed to disconnect from BLE device: %s", str(e))
+            _LOGGER.debug("Disconnected from active Bluetooth client")
         return self._finish_update()
